@@ -512,3 +512,179 @@ trainer = ReflectiveACTrainer(
 )
 
 trainer.train()
+
+##################################################FOR INFERENCE PART ########################################
+ ##THIS IS FOR IEMOCAP###
+
+InferenceInstruction_Prompt = """
+Analyze the given utterance within its dialogue context. Provide a concise appraisal and predict an emotion label in the following format:
+
+Situation: [Brief context description]
+Speaker's perspective: [Speaker's goals or intentions]
+Impact: [The impact of the utterance on the conversation]
+
+Keep each section to 1-2 sentences. Base your analysis solely on the provided dialogue.
+Dialogue context: {dialogue}
+Utterance to analyze: {utterance}
+
+Response Format:
+Emotion Label: [choose one from: happy, sad, neutral, angry, excited, frustrated]
+Explanation: [Brief appraisal explaining the chosen emotion label]
+
+Response:
+"""
+
+from sklearn.metrics import f1_score, recall_score, precision_score
+import json
+import torch
+from tqdm import tqdm
+from collections import Counter
+
+def convert_string_to_emotion(score):
+    label_mapping = {
+        'hap': 'happy',     # 'hap' -> 'happy'
+        'sad': 'sad',       # 'sad' remains 'sad'
+        'neu': 'neutral',   # 'neu' -> 'neutral'
+        'ang': 'angry',     # 'ang' -> 'angry'
+        'exc': 'excited',   # 'exc' -> 'excited'
+        'fru': 'frustrated' # 'fru' -> 'frustrated'
+    }
+    # return label_mapping.get(score, "Unknown")  # Use label_mapping instead of score_to_emotion
+    return label_mapping[score]
+
+
+
+conversion_map = {
+    'disgust': 'disgust',
+    'sadness': 'sad',
+    'happiness': 'happy',
+    'anger': 'angry',
+    'surprise': 'surprised',  # 修正拼写错误
+    'neutral': 'neutral'
+    }
+    return conversion_map[emotion]
+
+def EM(prediction, sentiment):
+    return prediction.lower() == sentiment.lower()
+
+#########LOAD THE SAVED WEIGHTS FROM LLM###############
+def load(path, agent):
+  checkpoint = torch.load(path, weights_only=True)
+  agent.model.load_state_dict(checkpoint['model_state_dict'])
+  agent.critic.load_state_dict(checkpoint['critic_state_dict'])
+  agent.target_critic.load_state_dict(checkpoint['target_critic_state_dict'])
+  agent.critic_optimizer.load_state_dict(checkpoint['critic_optimizer_state_dict'])
+  agent.lm_optimizer.load_state_dict(checkpoint['lm_optimizer_state_dict'])
+  return agent
+
+results_dict = {}
+
+def evaluate(json_data, tokenizer, device, agent, model_path):
+    if model_path:
+        agent = load(model_path, agent)
+
+    agent.model.eval()  # Set the model to evaluation mode
+
+    with open(json_data, 'r') as f:
+        data = json.load(f)
+
+    true_labels = []
+    predicted_labels = []
+    known_labels = set()
+
+    utterances = list(data.values())
+ 
+
+    prompts = [InferenceInstruction_Prompt.format(utterance=item['utter'], dialogue=item['dialog']) for item in utterances]
+     
+    #####THIS IS FOR DAILYDIALOG
+    ##prompts = [InferenceInstruction_Prompt_daily.format(utterance=item['utter'], dialogue=item['dialog']) for item in utterances]
+
+    encodings = tokenizer(prompts, return_tensors='pt', padding=True, truncation=True, max_length=512).to(device)
+
+    batch_accuracies = []
+    total_correct = 0
+    total_samples = 0
+    batch_size = 32
+
+    for i in tqdm(range(0, len(utterances), batch_size), desc="Evaluating"):
+        batch_data = utterances[i:i+batch_size]
+        batch_encodings = {k: v[i:i+batch_size] for k, v in encodings.items()}
+
+        with torch.no_grad():
+            outputs = agent.model.generate(
+                **batch_encodings,
+                pad_token_id=tokenizer.eos_token_id,
+                max_length=batch_encodings['input_ids'].size(1) + 200,
+                num_return_sequences=1,
+                top_p = 0.8,
+                use_cache=True)
+
+        responses = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        batch_true_labels = []
+        batch_predicted_labels = []
+          # Initialize an empty dictionary to store results
+
+        for item, response in zip(batch_data, responses):
+            # true_label = convert_string_to_emotion(item['label'])
+
+            #dailydialog
+            true_label = convert_emotion_label(item['label'])
+
+            # known_labels.add(true_label)
+
+
+            if 'Emotion Label:' not in response:
+                print(f"Warning: 'Emotion Label:' not found in response for utterance: {item['utter']}")
+                predicted_label = "unknown"
+            else:
+                response_label = response.split('Emotion Label:')[-1].strip()
+
+                if not response_label:
+                    print(f"Warning: No text after 'Emotion Label:' for utterance: {item['utter']}")
+                    predicted_label = "unknown"
+                else:
+                    predicted_label = response_label.split()[0].strip().lower()
+
+            predicted_label = predicted_label
+            # print(predicted_label)
+            # respond = response.split('Explanation:')[-1].strip()
+            # print(predicted_label, respond)
+
+            # ####dailydialog
+            # # predicted_label = predicted_label
+            respond = response.split('Explanation:')[-1].strip()
+        
+
+            batch_true_labels.append(true_label.lower())
+            batch_predicted_labels.append(predicted_label.lower())
+
+        batch_correct = sum(EM(pred, true) for pred, true in zip(batch_predicted_labels, batch_true_labels))
+      
+        batch_accuracy = batch_correct / len(batch_data)
+        batch_accuracies.append(batch_accuracy)
+
+        total_correct += batch_correct
+        total_samples += len(batch_data)
+
+        true_labels.extend(batch_true_labels)
+        predicted_labels.extend(batch_predicted_labels)
+
+        print(f"Batch Accuracy: {batch_accuracy:.4f}")
+        print("--------------------------------")
+
+
+    overall_accuracy = total_correct / total_samples
+   
+    # Calculate additional metrics
+    f1 = f1_score(true_labels, predicted_labels, average='weighted')
+ 
+
+    # print(f"Overall Accuracy: {overall_accuracy:.4f}")
+    # print(f"F1-score: {f1:.4f}")
+     
+    return {
+        'overall_accuracy': overall_accuracy,
+        'f1_score': f1 
+    }
