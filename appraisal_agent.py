@@ -19,41 +19,39 @@ if torch.cuda.is_available():
      model.cuda()
 
 lora_config = LoraConfig(
-                r=32, #
+                r=16, #16
                 target_modules=['q_proj', 'k_proj', 'v_proj', 'o_proj'],
                 task_type=TaskType.CAUSAL_LM,
-                lora_alpha=32,  
-                lora_dropout= 0.05 #0.1 #0.05
+                lora_alpha=16, 
+                lora_dropout= 0.05 #0.05 #0.1 #0.05
             )
 
-PREDICT_INSTRUCTION = """
-### Instruction:
-Given a list of facts, predict the emotion behind the last utterance of {ticker}. Give your response in this format:
-(1) Emotion Label: Choose from the following set: ['happy', 'sad', 'neutral', 'angry', 'excited', 'frustrated']
-(2) Deduction: Explain your reasoning by clearly stating the key facts and how they logically lead to the predicted emotion.
-
-### Examples:
-Here are some examples:
-{examples}
-(END OF EXAMPLES)
-
-### Facts:
-{summary}
-
-### Emotion Label:"""
 
 
+AppraisalGenerator_PROMPT = """
+Instruction: Deduce the emotion behind the given utterance, using ONLY the provided dialog and premises. Do not make assumptions beyond the given information. Respond using ONLY the following format:
 
-class PredictAgent:
-    def __init__(self, ticker: str, summary: str, target: str, predict_llm=model, tokenizer=tokenizer) -> None:
-        self.ticker = ticker
-        self.summary = summary
+Emotion Label: [choose one from: happy, sad, neutral, angry, excited, frustrated]
+Appraisal: [Your reasoning in 2-3 short sentences]
+
+Utterance: {utterance}
+Dialog context: {dialog}
+Premises: {knowledge}
+
+Your Response:
+"""
+
+
+
+class AppraisalAgent:
+    def __init__(self, utter: str, knowledge: str, target: str, predict_llm=model, tokenizer=tokenizer) -> None:
+        self.utter = utter
+        self.knowledge = knowledge
         self.target = target
         self.prediction = ''
 
-        self.predict_prompt = PREDICT_INSTRUCTION
-        self.predict_examples = PREDICT_EXAMPLES
-
+        self.predict_prompt = AppraisalGenerator_PROMPT
+        
         self.llm = predict_llm
         self.tokenizer = tokenizer
 
@@ -64,15 +62,15 @@ class PredictAgent:
         if reset:
             self.__reset_agent()
 
-        facts = "Facts:\n" + self.summary + "\n\nEmotion Label: "
-        self.scratchpad += facts
-        # print(facts, end="")
+        knowledge = "Knowledge:\n" + self.knowledge + "\n\nEmotion Label: "
+        self.scratchpad += knowledge
+        # print(knowledge, end="")
 
         try:
             response = self.prompt_agent()
             self.scratchpad += response
             parsed_response = self.scratchpad.split('Emotion Label:')[-1].strip()
-            # self.prediction = parsed_response
+          
             self.prediction = parsed_response.split()[0]
             print("scratchpad----------------")
             print(self.prediction, end="\n\n\n\n")
@@ -85,17 +83,15 @@ class PredictAgent:
         self.finished = True
 
 
-
     def run_reflect(self, response, reset=True) -> None:
-        # if reset:
-        #     self.__reset_agent()
+       
         try:
             # response = self.prompt_agent()
             self.scratchpad += response
             parsed_response = self.scratchpad.split('Emotion Label:')[-1].strip()
             # self.prediction = parsed_response
             self.prediction = parsed_response.split()[0]
-            print("scratchpad-----aftter reflect-----------")
+            print("scratchpad-----after reflect-----------")
             print(self.prediction, end="\n\n\n\n")
 
             ass = self.is_correct()
@@ -110,7 +106,6 @@ class PredictAgent:
         self.finished = True
 
 
-
     def prompt_agent(self) -> str:
         prompt = self._build_agent_prompt()
         print(f"Prompt----: {prompt}")
@@ -122,7 +117,7 @@ class PredictAgent:
                 input_ids=encoding.input_ids,
                 attention_mask=encoding.attention_mask,
                 pad_token_id=self.tokenizer.eos_token_id,
-                max_length=encoding.input_ids.size(1) + 150,  # Extend max_length by 150 tokens for the generated summary
+                max_length=encoding.input_ids.size(1) + 150,  # Extend max_length by 150 tokens for the generated appraisal
                 num_return_sequences=1
             )
 
@@ -133,10 +128,10 @@ class PredictAgent:
         return response
 
     def _build_agent_prompt(self) -> str:
-        return self.predict_prompt.format(
-            ticker=self.ticker,
+        return self..format(
+            utter=self.utter,
             examples=self.predict_examples,
-            summary=self.summary
+            knowledge=self.knowledge
         )
 
     def is_finished(self) -> bool:
@@ -154,185 +149,35 @@ class PredictAgent:
         self.scratchpad: str = ''
 
 
-class NShotLLM:
-    def __init__(self, model=None, tokenizer=None, reward_model=None, num_shots=4):
-        self.model = model
-        self.tokenizer = tokenizer
-        self.reward_model = reward_model
-        self.num_shots = num_shots
-
-    def queries_to_scores(self, list_of_strings):
-        return [output["score"] for output in self.reward_model(list_of_strings)]
-
-    def __call__(self, prompt):
-        query = self.tokenizer.encode(prompt, return_tensors="pt")
-        queries = query.repeat((self.num_shots, 1))
-        output_ids = self.model.generate(
-            queries,
-            do_sample=True,
-            temperature=0.7,
-            max_new_tokens=64,
-        )
-        output = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)
-        scores = torch.tensor(self.queries_to_scores(output))
-        output_ids = output_ids[scores.topk(1).indices[0]][len(query[0]):]
-        response = self.tokenizer.decode(output_ids, skip_special_tokens=True)
-        return response
-
-
-
-"""## this part is for showing the test case ##"""
-
-REFLECTION_HEADER = 'You have attempted to tackle the following task before and failed.'
-
-
-# Path: your_module.py
-from typing import List
-
-class PredictReflectAgent2(PredictAgent):
-    def __init__(self,
-                 ticker: str,
-                 summary: str,
-                 target: str,
-                 predict_llm,
-                 reflect_llm,
-                 tokenizer,
-                 tokenizer2
-                 ) -> None:
-
-        super().__init__(ticker, summary, target, predict_llm, tokenizer)
-        self.predict_llm = predict_llm
-        self.reflect_llm = reflect_llm
-        # self.agent_prompt = PREDICT_REFLECT_INSTRUCTION
-
-        self.reflections = []
-
-        self.tokenizer = tokenizer2
-        self.reflections_str: str = ''
-
-        self.reflection_generator = ReflectionGenerator(reflect_llm, tokenizer)
-        self.emotion_label_generator = EmotionLabelGenerator(predict_llm, tokenizer2)
-
-        self.target = target
-
-        # self.prediction= '' #self.scratchpad.split('Emotion Label:')[-1]
-
-
-    def run(self, reset=True) -> None:
-
-        PredictAgent.run(self, reset=reset)
-
-        # if self.is_finished() and not self.is_correct():
-        #     model_output = self.reflect()
-
-        #     # pred = model_output.split('Emotion Label:')[-1].split()[0]
-
-
-        #     # print("correcting the mind after refleciotn-----------------", pred)
-
-
-        #     PredictAgent.run_reflect(self, model_output, reset=True)
-
-
-    # def run(self, reset=True) -> None:
-        # if self.is_finished() and not self.is_correct():
-        #     self.reflect()
-
-            # pred = model_output.split('Emotion Label:')[-1].split()[0]
-
-
-            # print("correcting the mind after refleciotn-----------------", pred)
-
-
-            # PredictAgent.run_reflect(self, model_output, reset=True)
-
-
-        # PredictAgent.run(self, reset=False)
-
-
-    def reflect(self) -> str:
-        print('Reflecting...\n')
-        reflection = self.prompt_reflection()
-
-        print("Reflection generated:", reflection)
-
-        self.reflections += [reflection]
-        self.reflections_str = format_reflections(self.reflections)
-
-        print("Formatted reflections:")
-        print(self.reflections_str, end="\n\n\n\n")
-
-        model_output = self.emotion_label_generator.generate_emotion_label(context = self.ticker, facts=self.summary, reflections = self.reflections_str, examples=self.predict_examples )
-
-        return model_output
-
-    def prompt_reflection(self) -> str:
-
-        reflection = self.reflection_generator.generate_reflection(
-            previous_label=self.scratchpad.split('Emotion Label:')[-1].split()[0],
-            context=self.ticker,
-            previous_trial=self.scratchpad
-        )
-        return reflection
-
-    def run_n_shots(self, model, tokenizer, reward_model, num_shots=4, reset=True) -> None:
-        self.llm = NShotLLM(model, tokenizer, reward_model, num_shots)
-        super().run(reset=reset)
-
-
-
-class ReflectionGenerator:
-    def __init__(self, reflect_llm, tokenizer):
-        self.reflect_llm = reflect_llm
-        self.tokenizer = tokenizer
-
-    def generate_reflection(self, previous_label: str, context: str, previous_trial: str) -> str:
-        prompt = (
-            f"You will be given a previous trial in which you were given access to a list of facts to predict the emotion label of the last utterance of {context}."
-            f"You were unsuccessful in deductive reasoning because you gave the wrong emotion label of {previous_label}."
-            f"Re-evaluate the emotional context and overall tone of the last utterance. Use complete sentences.\n\n"
-            f"Reflection:\n"
-        )
-
-        encoding = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=2048)
-
-        outputs = self.reflect_llm.generate(
-            input_ids=encoding.input_ids,
-            attention_mask=encoding.attention_mask,
-            pad_token_id=self.tokenizer.eos_token_id,
-            max_length=encoding.input_ids.size(1) + 100,
-            num_return_sequences=1,
-            use_cache=True
-        )
-
-        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        return response.strip()
-###this is for counterfactural
-Conterfactural_reasoning_Prompt = """
+CounterfactualReasoning_PROMPT = """
 Instruction:
 What if the speaker's emotional response wasn't {previous_label}, but instead displayed a different emotion?
 
 Steps:
-Premises: Carefully re-examine each {premises}
-Utterance: Identify key emotional indicators in {utterance}
-Counterfactual Emotion:
-a. Predict an emotion that contradicts the apparent emotion in the utterance
-b. Analyze how this contradictory emotion could fit the situation
-c. Explore the implications if the speaker were feeling this contradictory emotion
+1. Premises: Carefully re-examine each {knowledge}
+2. Utterance: Identify key emotional indicators in {utterance}
+3. Counterfactual Emotion:
+    a. Predict an emotion that contradicts the apparent emotion in the utterance
+    b. Analyze how this contradictory emotion could fit the situation
+    c. Explore the implications if the speaker were feeling this contradictory emotion
 
 Response Format:
-Emotion Label: [ONE label from: happy, sad, neutral, angry, excited, frustrated]
-Explanation: [Your reasoning in 2-3 short sentences, including how the contradictory emotion fits the situation and its potential implications]
+Emotion Label: [choose one from: happy, sad, neutral, angry, excited, frustrated]
+Appraisal: [Your reasoning in 2-3 short sentences]
+
 Your Response:
 """
+
+
+#####################initiate performing counterfactual reasoning####################
 
 # Path: your_module.py
 from typing import List
 
-class PredictReflectAgent2(PredictAgent):
+class ReflectAgent(AppraisalAgent):
     def __init__(self,
-                 ticker: str,
-                 summary: str,
+                 utter: str,
+                 knowledge: str,
                  target: str,
                  dialog: str,
                  predict_llm,
@@ -341,8 +186,8 @@ class PredictReflectAgent2(PredictAgent):
                  tokenizer2
                  ) -> None:
 
-        #this part is for initializing the predictagent
-        super().__init__(ticker, summary, target, dialog, predict_llm, tokenizer)
+        #this part is for initializing the appraisal agent
+        super().__init__(utter, knowledge, target, dialog, predict_llm, tokenizer)
         self.predict_llm = predict_llm
         self.reflect_llm = reflect_llm
         # self.agent_prompt = PREDICT_REFLECT_INSTRUCTION
@@ -361,8 +206,7 @@ class PredictReflectAgent2(PredictAgent):
 
         self.update_explanation = ''
 
-        self.predict_examples = PREDICT_EXAMPLES
-
+     
         # self.prediction = self.scratchpad.split('Emotion Label:')[-1].strip()
 
 ##############################this is the original one ##########################
@@ -377,24 +221,21 @@ class PredictReflectAgent2(PredictAgent):
         PredictAgent.run(self, reset=reset)
 
 
-    def reflect_1(self, summary, label) -> None:
+    def reflect_1(self, knowledge, label) -> None:
         print('-------------#################>>>>>>>>>>>Reflecting#################################...\n')
         print(label)
         print("#################################################")
-        # model_output = self.emotion_label_generator.generate_emotion_label(context = self.ticker, facts = summary, previous_label=self.scratchpad.split('Emotion Label:')[-1].strip())
+        
+        model_output = self.emotion_label_generator.generate_emotion_label(context = self.utter, knowledge = knowledge, previous_label= label)
 
-        model_output = self.emotion_label_generator.generate_emotion_label(context = self.ticker, facts = summary, previous_label=str(label))
-
-
-        # self.update_explanation = model_output.split('Appraisal:')[-1].strip()
-        self.update_explanation = model_output.split('Explanation:')[-1].strip()
+        self.update_explanation = model_output.split('Appraisal:')[-1].strip()
 
         # response= model_output.split('Emotion:')[-1]
         response= model_output.split('Emotion Label:')[-1]
 
         self.prediction = response.split()[0].strip()
 
-        print("correcting the mind after refleciotn---------------->>>>>>>-", self.prediction)
+        print("correcting the mind after reflection---------------->>>>>>>-", self.prediction)
         print("do reasoning----------------", self.update_explanation)
         print("-------------------------------------------------------------------------------------------------")
         print("true is ----------------", self.target)
@@ -402,43 +243,6 @@ class PredictReflectAgent2(PredictAgent):
         outts = self.is_corrects()
         print("after reflection they are:", outts)
 
-
-
-    def reflect_2(self) -> None:
-        prompt_re = Re_PREDICT_INSTRUCTIONS.format(facts = self.summary, utterance = self.ticker)
-         # Tokenize the prompt and generate attention mask
-        encoding = self.tokenizer(prompt_re, return_tensors="pt", padding=True, truncation=True, max_length=2048)
-
-        outputs = self.llm.generate(
-                input_ids=encoding.input_ids,
-                attention_mask=encoding.attention_mask,
-                pad_token_id=self.tokenizer.eos_token_id,
-                max_length=encoding.input_ids.size(1) + 300,  # Extend max_length by 150 tokens for the generated summary
-                num_return_sequences=1,
-                temperature=0.7,
-                use_cache=True
-            )
-
-        # response = self.tokenizer.batch_decode(outputs,skip_special_tokens=True)
-
-        # Decode the outputs to get the string
-        respond = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-        self.prediction = respond.split()[0].strip()
-
-        predict = respond.split('Emotion Label:')[-1]
-        self.prediction = predict.split()[0].strip()
-
-        self.update_explanation = respond.split('Explanation:')[-1].strip()
-
-        print("------------correcting the mind after refleciotn-----------------", self.prediction)
-        print("do reasoning----------------", self.update_explanation)
-        print("true is ----------------", self.target)
-
-
-    def run_n_shots(self, model, tokenizer, reward_model, num_shots=4, reset=True) -> None:
-        self.llm = NShotLLM(model, tokenizer, reward_model, num_shots)
-        super().run(reset=reset)
 
     def is_corrects(self) -> bool:
         return EMs(self.target, self.prediction)
@@ -453,11 +257,11 @@ class EmotionLabelGenerator:
         self.predict_llm = predict_llm
         self.tokenizer = tokenizer
 
-    def generate_emotion_label(self, previous_label: str, context: str, facts: str,) -> str:
+    def generate_emotion_label(self, previous_label: str, context: str, knowledge: str,) -> str:
 
-        prompt = Reflect_predict_INSTRUCTION.format(
+        prompt = CounterfactualReasoning_PROMPT .format(
             previous_label = previous_label,
-            premises = facts,
+            premises = knowledge,
             utterance=context)
 
         encoding = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=2048)
@@ -466,9 +270,9 @@ class EmotionLabelGenerator:
             input_ids=encoding.input_ids,
             attention_mask=encoding.attention_mask,
             pad_token_id=self.tokenizer.eos_token_id,
-            max_length=encoding.input_ids.size(1) + 300,
+            max_length=encoding.input_ids.size(1) + 250,
             num_return_sequences=1,
-            temperature=0.3,
+            temperature=0.8,
             use_cache=True
         )
 
@@ -481,16 +285,17 @@ def format_reflections(reflections: List[str]) -> str:
     if not reflections:
         return ''
     else:
-        # return header + '\nExplanation:\n- ' + '\n- '.join([r.strip() for r in reflections])
-        # return '\nExplanation:\n- ' + '\n- '.join([r.strip() for r in reflections])
-        # return '\nExplanation:\n- ' + '\n- '.join([r.strip() for r in reflections])
+        # return header + '\nAppraisal:\n- ' + '\n- '.join([r.strip() for r in reflections])
+        # return '\nAppraisal:\n- ' + '\n- '.join([r.strip() for r in reflections])
+        # return '\nAppraisal:\n- ' + '\n- '.join([r.strip() for r in reflections])
         return [r.strip() for r in reflections]
 
 
-
-agent_cls = PredictReflectAgent2
-agents = [agent_cls(row['ticker'], row['summary'], row['target'],row['dialog'], model, model, tokenizer, tokenizer) for _, row in data[63:].iterrows()]
+agent_cls =ReflectAgent
+agents = [agent_cls(row['utter'], row['knowledge'], row['target'],row['dialog'], model, model, tokenizer, tokenizer) for _, row in data[:50].iterrows()]
 print("Loaded Train Agents.")
+
+######################store in appraisal trajectories##############################
 
 import json
 from tqdm import tqdm
@@ -501,7 +306,13 @@ datasets_dir = "./datasets/"
 # Collect comparison data
 comparison_data = []
 
+collect = []
+collect1 = []
+collect2 = []
 for trial in tqdm(range(num_reflect_trials), desc="Trials"):
+    counter=0
+    counter_1 = 0
+    counter_2 = 0
     print(f"\n{'#' * 40}")
     print(f"Let's get started with trial: {trial}")
     print(f"{'#' * 40}\n")
@@ -522,10 +333,14 @@ for trial in tqdm(range(num_reflect_trials), desc="Trials"):
             rewards = 0
             done = False
             update_state=''
+            counter+=1
         else:
             rewards = -1
             done = True
-            agent.reflect_1(previous_states, prev_lab)
+            # agent.reflect_1(previous_states, prev_lab)
+
+            agent.reflect_1(agent.update_explanation, prev_lab)
+
             label = agent.prediction
 
             update_state = agent.update_explanation
@@ -534,13 +349,15 @@ for trial in tqdm(range(num_reflect_trials), desc="Trials"):
             if agent.is_corrects():
                 rewards += 1
                 done = False
+                counter_1 +=1
+
             else:
                 prev_lab.append(label)
                 rewards += -1
                 done = True
 
         sample = {
-            "user_input": agent.ticker,
+            "user_input": agent.utter,
             "state": current_state,
             "update_state": update_state,
             "actor_rewards": rewards,
@@ -553,19 +370,21 @@ for trial in tqdm(range(num_reflect_trials), desc="Trials"):
         comparison_data.append(sample)
 
         if done:
-            agent.reflect_1(previous_states, prev_lab)
+            # agent.reflect_1(previous_states, prev_lab)
+            agent.reflect_1(agent.update_explanation, prev_lab)
             update_state = agent.update_explanation
             previous_states.append(update_state)
 
             if agent.is_corrects():
                 rewards += 1
                 done = False
+                counter_2 += 1
             else:
                 rewards += -1
                 done = True
 
             sample = {
-                "user_input": agent.ticker,
+                "user_input": agent.utter,
                 "state": current_state,
                 "update_state": update_state,
                 "actor_rewards": rewards,
@@ -577,12 +396,205 @@ for trial in tqdm(range(num_reflect_trials), desc="Trials"):
 
             comparison_data.append(sample)
 
+        collect.append(counter)
+        collect1.append(counter_1)
+        collect2.append( counter_2)
 
 
+###evaluatorLLM###########
+import nltk
+nltk.download('punkt')
+from nltk.tokenize import word_tokenize
+nltk.download('stopwords')
+from nltk.corpus import stopwords
+stopwords = stopwords.words("english")
+
+import json
+import numpy as np
+import string
+from tqdm import tqdm
+
+class EmotionAnalyzer:
+    def __init__(self, vad_filepath, json_file, stopwords, predict_llm, tokenizer):
+        self.vad_dict = self.load_nrc_vad_lexicon(vad_filepath)
+        self.json_data = self.load_json_data(json_file)
+        self.stop_words = stopwords
+        self.predict_llm = predict_llm
+        self.tokenizer = tokenizer
+
+    def load_nrc_vad_lexicon(self, filepath):
+        print("Loading VAD lexicon...")
+        with open(filepath, 'r') as file:
+            vad_dict = json.load(file)
+        print("VAD lexicon loaded successfully.")
+        return vad_dict
+
+    def load_json_data(self, filepath):
+        print("Loading JSON data...")
+        with open(filepath, 'r') as file:
+            json_data = json.load(file)
+        print("JSON data loaded successfully.")
+        return json_data
+
+    def tokenize(self, text):
+        return text.lower().split()
+
+    def clean_response(self, response):
+        # Remove punctuation and strip whitespace for a robust comparison
+        return response.strip().lower().translate(str.maketrans('', '', string.punctuation))
+
+     # the min_max is computed based on all datasets
+    def min_max_normalize(self, values, new_min=-1, new_max=1):
+
+        print(values)
+        old_min = min(values)
+        old_max = max(values)
+
+        if old_min == old_max:
+            return [new_min + (new_max - new_min) / 2] * len(values)
+
+        normalized_values = [
+            new_min + (value - old_min) * (new_max - new_min) / (old_max - old_min)
+            for value in values
+        ]
+        return normalized_values
+
+    def compute_vad_scores(self, utterances):
+        total_val = []
+        total_arous = []
+        print("Computing VAD scores...")
+        for utterance in tqdm(utterances, desc="Processing utterances"):
+            tokens = [token for token in self.tokenize(utterance) if token not in self.stop_words]
+            valence_scores = []
+            arousal_scores = []
+
+            for token in tokens:
+                if token in self.vad_dict:
+                    valence_scores.append(self.vad_dict[token][0])
+                    arousal_scores.append(self.vad_dict[token][1])
+                # else:
+                #     valence_scores.append(0)
+                #     arousal_scores.append(0)
+
+            avg_valence = round(np.mean(valence_scores), 2)
+            avg_arousal = round(np.mean(arousal_scores), 2)
+
+            total_val.append(avg_valence)
+            total_arous.append(avg_arousal)
+
+        return total_val, total_arous
+
+    def generate_emotion_label(self, emo, valence, arousal):
+        Evaluation_PROMPT = f'''
+                Given the range of the {emo} class in the Circumplex Model of Affect, do the valence score of {valence} and the arousal score of {arousal} together fit within this range?
+
+                Answer only 'yes' or 'no'.
+                '''
+
+        prompt = Evaluation_PROMPT.format(
+            emo=emo,
+            valence=valence,
+            arousal=arousal)
+
+        encoding = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=2048)
+
+        outputs = self.predict_llm.generate(
+            input_ids=encoding.input_ids,
+            attention_mask=encoding.attention_mask,
+            pad_token_id=self.tokenizer.eos_token_id,
+            max_length=encoding.input_ids.size(1) + 10,
+            num_return_sequences=1)
 
 
+        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        resd = response.split('Answer:')[-1].strip()
+
+        # resd = response.split()
+        print("------------this gonna show yes or no--------",valence, arousal, emo)
+
+        try:
+          print("------------this gonna show yes or no--------", resd.split()[0])
+          cleaned_response = self.clean_response(resd.split()[0])
+          reward = 0 if cleaned_response == "yes" else -1
 
 
+        except IndexError:
+          print("Error: resd is empty or contains only whitespace")
+          cleaned_response = ""
+          reward = -1  # or whatever default value makes sense in your context
+
+        # print("------------this gonna show yes or no--------", resd.split()[0])
 
 
-"""
+        # cleaned_response = self.clean_response(resd.split()[0])
+        # reward = 0 if cleaned_response == "yes" else -1
+
+        return reward
+
+    def process_json_data(self):
+        json_data = self.json_data
+        new_json_data = []
+        all_states = []
+        all_update_states = []
+
+        print("Collecting states and update states...")
+        for item in tqdm(json_data, desc="Collecting states"):
+            if item['done']:
+                # print(item)
+
+                all_states.append(item['state'])
+                if item.get('update_state'):
+                  all_update_states.append(item['update_state'])
+            else:
+                # print("--------------------", item['done'])
+
+                if item.get('update_state'):
+                  all_states.append(item['update_state'])
+                else:
+                  all_states.append(item['state'])
+
+        # Compute VAD scores for all states and update_states
+        state_valences, state_arousals = self.compute_vad_scores(all_states)
+        update_valences, update_arousals = self.compute_vad_scores(all_update_states)
+
+        norm_state_valence = self.min_max_normalize(state_valences)
+        norm_state_arousal = self.min_max_normalize(state_arousals)
+        norm_update_valence = self.min_max_normalize(update_valences)
+        norm_update_arousal = self.min_max_normalize(update_arousals)
+
+        update_index = 0 #####while update_valence and update_arousal are only computed for 'done' items.
+        print("Processing items and generating emotion labels...")
+        for i, item in tqdm(enumerate(json_data), desc="Processing items", total=len(json_data)):
+            new_item = item.copy()
+            emotion_label = item['target']
+
+            if item['done']:
+                state_valence = norm_state_valence[i]
+                state_arousal = norm_state_arousal[i]
+
+
+                # Check if we still have updates available
+                if update_index < len(norm_update_valence):
+                    update_valence = norm_update_valence[update_index]
+                    update_arousal = norm_update_arousal[update_index]
+
+                    # Generate emotion labels for both
+                    state_reward = self.generate_emotion_label(emotion_label, state_valence, state_arousal)
+                    update_reward = self.generate_emotion_label(emotion_label, update_valence, update_arousal)
+
+                    # Use the worse reward
+                    reward = state_reward + update_reward
+                    update_index += 1
+
+            else:
+                state_valence = norm_state_valence[i]
+                state_arousal = norm_state_arousal[i]
+                reward = self.generate_emotion_label(emotion_label, state_valence, state_arousal)
+
+            # Add the critic_rewards to the new item
+            new_item['critic_rewards'] = reward
+            new_json_data.append(new_item)
+
+        return new_json_data
+
+
