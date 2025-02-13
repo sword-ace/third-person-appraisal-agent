@@ -405,7 +405,7 @@ with open("no_reflection_correct_data.json", "w") as f:
     json.dump(correct_no_reflection, f, indent=4)
 
 
-###evaluatorLLM###########
+########evaluatorLLM###########
 import nltk
 nltk.download('punkt')
 from nltk.tokenize import word_tokenize
@@ -417,6 +417,30 @@ import json
 import numpy as np
 import string
 from tqdm import tqdm
+
+if torch.cuda.is_available():
+     model_id = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+     tokenizer = AutoTokenizer.from_pretrained(model_id)
+     model_eval = AutoModelForCausalLM.from_pretrained(
+         model_id,
+         torch_dtype=torch.bfloat16,
+         device_map="auto",
+         )
+     model_eval.cuda()
+
+lora_config = LoraConfig(
+                r=32, #
+                target_modules=['q_proj', 'k_proj', 'v_proj', 'o_proj'],
+                task_type=TaskType.CAUSAL_LM,
+                lora_alpha=32,  
+                lora_dropout= 0.05 #0.1 #0.05
+
+
+
+model_eval = get_peft_model(model_eval, lora_config)
+print("Using LoRA")
+model_eval.print_trainable_parameters()
+
 
 class EmotionAnalyzer:
     def __init__(self, vad_filepath, json_file, stopwords, predict_llm, tokenizer):
@@ -526,13 +550,6 @@ class EmotionAnalyzer:
           print("Error: resd is empty or contains only whitespace")
           cleaned_response = ""
           reward = -1  # or whatever default value makes sense in your context
-
-        # print("------------this gonna show yes or no--------", resd.split()[0])
-
-
-        # cleaned_response = self.clean_response(resd.split()[0])
-        # reward = 0 if cleaned_response == "yes" else -1
-
         return reward
 
     def process_json_data(self):
