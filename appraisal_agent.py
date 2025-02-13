@@ -9,7 +9,7 @@ import torch
 from transformers import AutoTokenizer, TextIteratorStreamer
 from transformers import AutoModelForCausalLM
 if torch.cuda.is_available():
-     model_id = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+     model_id = "mistralai/Mistral-7B-Instruct-v0.3"
      tokenizer = AutoTokenizer.from_pretrained(model_id)
      model = AutoModelForCausalLM.from_pretrained(
          model_id,
@@ -29,14 +29,19 @@ lora_config = LoraConfig(
 
 
 AppraisalGenerator_PROMPT = """
-Instruction: Deduce the emotion behind the given utterance, using ONLY the provided dialog and premises. Do not make assumptions beyond the given information. Respond using ONLY the following format:
+Analyze the given utterance within its dialog context. Provide a concise appraisal and predict an emotion label in the following format:
 
-Emotion Label: [choose one from: happy, sad, neutral, angry, excited, frustrated]
-Appraisal: [Your reasoning in 2-3 short sentences]
+Situation: [Brief context description]
+Speaker's perspective: [Speaker's goals or intentions]
+Impact: [The impact of the utterance on the conversation]
 
-Utterance: {utterance}
-Dialog context: {dialog}
-Premises: {knowledge}
+Keep each section to 1-2 sentences. Base your analysis solely on the provided dialogue.
+Dialogue context: {dialog}
+Utterance to analyze: {utterance}
+
+Response Format:
+Emotion Label: [Select one from: happy, sad, neutral, angry, excited, frustrated]
+Explanation: [Brief appraisal for the emotion label]
 
 Your Response:
 """
@@ -117,7 +122,7 @@ class AppraisalAgent:
                 input_ids=encoding.input_ids,
                 attention_mask=encoding.attention_mask,
                 pad_token_id=self.tokenizer.eos_token_id,
-                max_length=encoding.input_ids.size(1) + 150,  # Extend max_length by 150 tokens for the generated appraisal
+                max_length=encoding.input_ids.size(1) + 250,  # Extend max_length by 150 tokens for the generated appraisal
                 num_return_sequences=1
             )
 
@@ -150,21 +155,22 @@ class AppraisalAgent:
 
 
 CounterfactualReasoning_PROMPT = """
-Instruction:
-What if the speaker's emotional response wasn't {previous_label}, but instead displayed a different emotion?
+You made wrong prediction, please perform a counterfactual analysis for the target utterance to refine your understanding of the speaker's emotional state. Follow these steps to guide your thinking:
 
-Steps:
-1. Premises: Carefully re-examine each {knowledge}
-2. Utterance: Identify key emotional indicators in {utterance}
-3. Counterfactual Emotion:
-    a. Predict an emotion that contradicts the apparent emotion in the utterance
-    b. Analyze how this contradictory emotion could fit the situation
-    c. Explore the implications if the speaker were feeling this contradictory emotion
+1. Reflect on why predictions in {previous_label} mismatches between the predictions and the speaker's intentions or desires based on the target utterance.
+2. Imagine an alternative emotion that better aligns with the speaker's intentions and desires based on the dialog.
+
+Keep your analysis concise and structured. Use this counterfactual analysis to propose a more accurate emotion label that fits the given context.
+
+Dialogue context: {dialog}
+Utterance to analyze: {utterance}
 
 Response Format:
-Emotion Label: [choose one from: happy, sad, neutral, angry, excited, frustrated]
-Appraisal: [Your reasoning in 2-3 short sentences]
+Emotion Label: [Choose different one: happy, sad, neutral, angry, excited, frustrated]
+Analysis: [Step-by-step concise analysis based on the points above]
 
+Response:
+"""
 Your Response:
 """
 
@@ -208,14 +214,6 @@ class ReflectAgent(AppraisalAgent):
 
      
         # self.prediction = self.scratchpad.split('Emotion Label:')[-1].strip()
-
-##############################this is the original one ##########################
-    # def run(self, reset=True) -> None:
-    #     if self.is_finished() and not self.is_corrects():
-    #         self.reflect()
-    #     else:
-    #       PredictAgent.run(self, reset=reset)
-#######################################################################################
 
     def run(self, reset=True) -> None:
         PredictAgent.run(self, reset=reset)
@@ -292,7 +290,7 @@ def format_reflections(reflections: List[str]) -> str:
 
 
 agent_cls =ReflectAgent
-agents = [agent_cls(row['utter'], row['knowledge'], row['target'],row['dialog'], model, model, tokenizer, tokenizer) for _, row in data[:50].iterrows()]
+agents = [agent_cls(row['utter'], row['knowledge'], row['target'],row['dialog'], model, model, tokenizer, tokenizer) for _, row in data.iterrows()]
 print("Loaded Train Agents.")
 
 ######################store in appraisal trajectories##############################
@@ -303,16 +301,14 @@ from tqdm import tqdm
 num_reflect_trials = 1
 datasets_dir = "./datasets/"
 
-# Collect comparison data
-comparison_data = []
+# Collect data
+comparison_data = [] 
+predict_final = []
 
-collect = []
-collect1 = []
-collect2 = []
+collect_reflections = {2: [], 3: [], 4: [], 5: []} 
+correct_no_reflection = [] 
+
 for trial in tqdm(range(num_reflect_trials), desc="Trials"):
-    counter=0
-    counter_1 = 0
-    counter_2 = 0
     print(f"\n{'#' * 40}")
     print(f"Let's get started with trial: {trial}")
     print(f"{'#' * 40}\n")
@@ -325,80 +321,88 @@ for trial in tqdm(range(num_reflect_trials), desc="Trials"):
 
         agent.run()
         current_state = agent.explanation
-        previous_states = [current_state]  # Initialize as a list
+        prev = current_state
+
+        # previous_states = [current_state]  
         prev_lab = [agent.prediction]
         label = agent.prediction
 
         if agent.is_corrects():
             rewards = 0
             done = False
-            update_state=''
-            counter+=1
+            correct_no_reflection.append({
+                "trial": trial,
+                "agent_id": idx,
+                "reflection_round": 0, 
+                "user_input": agent.ticker,
+                "state": current_state,
+                "update_state": current_state,
+                "actor_rewards": rewards,
+                "action": agent.prediction,
+                "target": agent.target,
+                "done": done,
+                "dialog": agent.dialog
+            })
+            predict_final.append(agent.prediction)
         else:
             rewards = -1
             done = True
-            # agent.reflect_1(previous_states, prev_lab)
 
-            agent.reflect_1(agent.update_explanation, prev_lab)
 
-            label = agent.prediction
+            for reflection_round in range(1, 6):  
+                agent.reflect_1(prev_lab)  
+                label = agent.prediction
+                # previous_states = agent.update_explanation
+                prev = update_state
+                update_state = agent.update_explanation
 
-            update_state = agent.update_explanation
-            previous_states.append(update_state)
+                if agent.is_corrects():
+                    rewards = 0
+                    done = False
+                    predict_final.append(agent.prediction)
 
-            if agent.is_corrects():
-                rewards += 1
-                done = False
-                counter_1 +=1
 
-            else:
-                prev_lab.append(label)
-                rewards += -1
-                done = True
+                    break
+                else:
+                    rewards -= 1  
+                    # prev_lab = label
+                    prev_lab.append(label)  # add wrong predictions to prev_lab
 
-        sample = {
-            "user_input": agent.utter,
-            "state": current_state,
-            "update_state": update_state,
-            "actor_rewards": rewards,
-            "action": agent.prediction,
-            "target": agent.target,
-            "done": done,
-            "dialog": agent.dialog
-        }
+                    # current_state = agent.update_explanation
 
-        comparison_data.append(sample)
 
-        if done:
-            # agent.reflect_1(previous_states, prev_lab)
-            agent.reflect_1(agent.update_explanation, prev_lab)
-            update_state = agent.update_explanation
-            previous_states.append(update_state)
+              
+                if reflection_round >= 2:  # reflection starts from 2nd round
+                    collect_reflections[reflection_round].append({
+                        "trial": trial,
+                        "agent_id": idx,
+                        "reflection_round": reflection_round,
+                        "user_input": agent.ticker,
+                        "state": prev,
+                        "update_state": update_state,
+                        "actor_rewards": rewards,
+                        "action": agent.prediction,
+                        "target": agent.target,
+                        "done": done,
+                        "dialog": agent.dialog
+                    })
+                    
+                if done is False:
+                    break
 
-            if agent.is_corrects():
-                rewards += 1
-                done = False
-                counter_2 += 1
-            else:
-                rewards += -1
-                done = True
+for reflection_round in collect_reflections:
+    collect_reflections[reflection_round].extend(correct_no_reflection)
 
-            sample = {
-                "user_input": agent.utter,
-                "state": current_state,
-                "update_state": update_state,
-                "actor_rewards": rewards,
-                "action": agent.prediction,
-                "target": agent.target.lower(),
-                "done": done,
-                "dialog": agent.dialog
-            }
 
-            comparison_data.append(sample)
+# with open("comparison_data.json", "w") as f:
+#     json.dump(comparison_data, f, indent=4)
 
-        collect.append(counter)
-        collect1.append(counter_1)
-        collect2.append( counter_2)
+for reflection_round, comp_data in collect_reflections.items():
+    with open(f"reflection_{reflection_round}_data.json", "w") as f:
+        json.dump(comp_data, f, indent=4)
+
+with open("no_reflection_correct_data.json", "w") as f:
+    json.dump(correct_no_reflection, f, indent=4)
 
 
 ###evaluatorLLM###########
