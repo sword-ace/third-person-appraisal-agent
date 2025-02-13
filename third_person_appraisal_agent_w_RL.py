@@ -9,7 +9,7 @@ import torch
 from transformers import AutoTokenizer, TextIteratorStreamer
 from transformers import AutoModelForCausalLM
 if torch.cuda.is_available():
-     model_id = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+     model_id = "mistralai/Mistral-7B-Instruct-v0.3"
      tokenizer = AutoTokenizer.from_pretrained(model_id)
      model = AutoModelForCausalLM.from_pretrained(
          model_id,
@@ -19,11 +19,11 @@ if torch.cuda.is_available():
      model.cuda()
 
 lora_config = LoraConfig(
-                r=32, #
+                r=16, #
                 target_modules=['q_proj', 'k_proj', 'v_proj', 'o_proj'],
                 task_type=TaskType.CAUSAL_LM,
-                lora_alpha=32,  
-                lora_dropout= 0.05 #0.1 #0.05
+                lora_alpha=16,  
+                lora_dropout= 0.01 #0.1 #0.05
 
 
 
@@ -315,24 +315,23 @@ class AppraisalAgent(nn.Module):
         done = torch.Tensor(done).to(self.accelerator.unwrap_model(self.model).device, dtype = self.accelerator.unwrap_model(self.model).dtype).flatten()
         critic_reward = torch.Tensor(critic_reward).to(self.accelerator.unwrap_model(self.model).device, dtype = self.accelerator.unwrap_model(self.model).dtype).flatten()
 
-        q1, q2, v1 = self.critic(observation, state, detach_model=False)
+        q1, q2, v1, v2 = self.critic(observation, state, detach_model=False)
 
 
     ####anoter better option#################
-        alpha = 0.9 #0.8 #0.99
-        beta= 0.45 #0.45 #0.45 #0.5 #0.45
+        alpha = 0.9 
+        beta= 0.45 
 
         combined_reward = alpha * reward + beta * critic_reward
     
 
         with torch.no_grad():
 
-            target_q1, target_q2, target_v1= self.target_critic(observation, next_state, detach_model=True)
+            target_q1, target_q2, target_v1, target_v2 = self.target_critic(next_state, target, detach_model=True)
 
 
             target_v1 = combined_reward + (1-done) * target_v1.flatten() * self.gamma
-
-
+            target_v2 = combined_reward + (1-done) * target_v2.flatten() * self.gamma
 
         q1, q2, v1 = q1.flatten(), q2.flatten(), v1.flatten()
         target_q1, target_q2 = target_q1.flatten(), target_q2.flatten()
@@ -470,7 +469,7 @@ class ReflectiveACTrainer(Trainer):
                     advantages = q - v
 
 
-                loss_dict = self.agent.actor_loss(advantage=advantages, state =batch["state"], observation = list(batch["observation"]))
+                loss_dict = self.agent.actor_loss(advantage=advantages,  observation=batch["observation"], state=batch["state"])
 
                 loss = loss_dict["pg_loss"]
 
@@ -553,7 +552,6 @@ def convert_string_to_emotion(score):
     return label_mapping[score]
 
 
-
 conversion_map = {
     'disgust': 'disgust',
     'sadness': 'sad',
@@ -615,7 +613,7 @@ def evaluate(json_data, tokenizer, device, agent, model_path):
             outputs = agent.model.generate(
                 **batch_encodings,
                 pad_token_id=tokenizer.eos_token_id,
-                max_length=batch_encodings['input_ids'].size(1) + 200,
+                max_length=batch_encodings['input_ids'].size(1) + 250,
                 num_return_sequences=1,
                 top_p = 0.8,
                 use_cache=True)
@@ -676,15 +674,7 @@ def evaluate(json_data, tokenizer, device, agent, model_path):
 
 
     overall_accuracy = total_correct / total_samples
-   
-    # Calculate additional metrics
-    f1 = f1_score(true_labels, predicted_labels, average='weighted')
- 
-
-    # print(f"Overall Accuracy: {overall_accuracy:.4f}")
-    # print(f"F1-score: {f1:.4f}")
      
     return {
         'overall_accuracy': overall_accuracy,
-        'f1_score': f1 
     }
